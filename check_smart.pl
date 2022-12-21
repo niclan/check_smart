@@ -55,6 +55,7 @@
 # Dec 16, 2021: Lorenz Kaestle - Bugfix when interface parameter was missing in combination with -g (6.12.2)
 # Apr 27, 2022: Claudio Kuenzler - Allow skip temperature check (--skip-temp-check) (6.13.0)
 # Apr 27, 2022: Peter Newman - Better handling of missing or non-executable smartctl command (6.13.0)
+# Dec 21, 2022: Nicolai Langfeldt - support device enumeration with -d, comma separated
 
 use strict;
 use Getopt::Long;
@@ -92,6 +93,9 @@ GetOptions(
 			  "skip-temp-check" => \$opt_skip_temp,
 );
 
+# Behave as if -g was used even if it was -d with device list
+my $g_mode = 0;
+
 if ($opt_v) {
         print_revision($basename, $revision);
         exit $ERRORS{'OK'};
@@ -115,11 +119,18 @@ if ($opt_d || $opt_g ) {
         my(@dev);
 
         if ( $opt_d ){
-            # normal mode - push opt_d on the list of devices
-            push(@dev,$opt_d);
+	    if ( $opt_d =~ /,/ ) {
+		push(@dev,split(/,/,$opt_d));
+		$g_mode = 1;
+		$opt_g=''
+	    } else {
+		# normal mode - push opt_d on the list of devices
+		push(@dev,$opt_d);
+	    }
         } else {
             # glob all devices - try '?' first 
             @dev =glob($opt_g);
+	    $g_mode = 1;
         }
 
         foreach my $opt_dl (@dev){
@@ -253,7 +264,7 @@ foreach $device ( split("\\|",$device) ){
 		my($tag,$label);
 		$exit_status_local = 'OK';
 
-		if ($opt_g){
+		if ($g_mode){
 			# we had a pattern based on $opt_g
 			$tag   = $device;
 			$tag   =~ s/\Q$opt_g\E//;
@@ -718,7 +729,7 @@ foreach $device ( split("\\|",$device) ){
 		warn "###########################################################\n\n\n" if $opt_debug;
 		
 		if($exit_status_local ne 'OK'){
-		  if ($opt_g) {
+		  if ($g_mode) {
 			$status_string = $label.join(', ', @error_messages);
 			$status_string .= $label.join(', ', @warning_messages);
 			$status_string .= $label.join(', ', @notice_messages);
@@ -736,7 +747,7 @@ foreach $device ( split("\\|",$device) ){
 		  }
 		}
 		else {
-		  if ($opt_g) {
+		  if ($g_mode) {
 			$status_string = $label."Device is clean";
 			if (scalar(@error_messages) > 0) {
 				$status_string .= " ".$label.join(', ', @error_messages);
@@ -788,10 +799,14 @@ if ($opt_debug) {
 	warn "(debug)   msg_list: ".join('^', @msg_list)."\n\n";
 }
 
-$status_string = join( ($opt_g ? $Terminator : ' '), @msg_list);
+$status_string = join( ($g_mode ? $Terminator : ' '), @msg_list);
 
 # Final output: Nagios data and exit code
-print "$exit_status: $status_string|$perf_string\n";
+if ($g_mode) {
+    print "$exit_status: $status_string\n"
+} else {
+    print "$exit_status: $status_string|$perf_string\n";
+}
 exit $ERRORS{$exit_status};
 
 sub print_revision {
