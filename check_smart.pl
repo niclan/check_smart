@@ -55,7 +55,7 @@
 # Dec 16, 2021: Lorenz Kaestle - Bugfix when interface parameter was missing in combination with -g (6.12.2)
 # Apr 27, 2022: Claudio Kuenzler - Allow skip temperature check (--skip-temp-check) (6.13.0)
 # Apr 27, 2022: Peter Newman - Better handling of missing or non-executable smartctl command (6.13.0)
-# Dec 21, 2022: Nicolai Langfeldt - support device enumeration with -d, comma separated
+# Dec 21, 2022: Nicolai Langfeldt - support device enumeration with -d, comma separated and make it like -g for that usage
 
 use strict;
 use Getopt::Long;
