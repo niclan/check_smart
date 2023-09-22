@@ -1,0 +1,431 @@
+#!/usr/bin/perl
+
+# check_ssd: Check the remaining lifetime/wear of SSD disks.
+# - We want warnings well in advance of the disks expiring so
+#   thesholds set at 6 and 3 months from nominal expiry.
+#
+# Please see documentation below.
+
+use v5.10;
+use strict;
+use warnings;
+use Pod::Usage; # Bundled
+use Getopt::Std;
+use Scalar::Util; # Bundeled
+use Data::Dumper;
+use List::MoreUtils qw(first_index); # Bundled;
+
+my $OK       = 0;
+my $WARNING  = 1;
+my $CRITICAL = 2;
+my $UNKNOWN  = 3;
+
+my @state    = qw(OK WARNING CRITICAL UNKNOWN);
+
+=pod
+
+=head1 NAME
+
+check_ssdwear - Check all SSD disks in the system for wear left.
+
+=head1 SYNOPSIS
+
+check_ssdwear [options]
+
+  -h           Help - this text.
+  -w <months>  Warn if there are less than months left of wear.
+               Default is 6 months.  If the disk contains the
+               root file system the plugin will report CRITICAL
+               instead.
+  -c <months>  Critical if there are less than months left of wear.
+               Default is 3 months.
+  -p <percent> Warning if there is percent% or less left of wear. No
+               default but if a non-zero threshold is supplied by
+               smartctl this will be used unless this option is specified.
+  -q <percent> Critical if there is percent% or less left of wear
+               No default.
+  -n OK|WARNING|CRITICAL|UNKNOWN
+               State to report if there are no SSDs in the system
+  -u OK|WARNING|CRITICAL|UNKNOWN
+               State to report if there is a unsupported SSD in the system
+               This MUST be fixed by updating the plugin as the plugin
+               exits immediately if this is discovered, and no monitoring
+               will take place.
+  -h           This message
+
+NOTE! The program uses sudo to run smartctl, so your nagios/nrpe user
+needs sudo for this.
+
+NOTE! Do not use this in an alarm that wakes people up at night.  Disk
+weardown is NOT that acute! Or is it?
+
+NOTE! Use this plugin in combination with SMART plugin that monitors
+other health parameters of the disks.  In fact this plugin even
+ignores the "SMART overall-health self-assessment test result"
+focusing only on the wear and lifetime.
+
+Please refer do C<perldoc check_ssdwear> for full docs on hardware,
+caveats in the lifetime calculation, hardware support and usage
+restrictions.
+
+=head1 REQUIRED PROGRAMS
+
+External programs are required: sudo, lsblk, smartctl.
+
+The program uses sudo to run smartctl, so your nagios/nrpe user needs
+sudo for this.
+
+=head1 LIFETIME CALCULATION
+
+This plugin aims to estimate the remaining lifespan of SSDs in terms
+of months based on the wear percentage each time it is run. However,
+due to the high number of hours it takes for each percentage point of
+wear, the estimates will be inaccurate and wary over time.
+
+Because: 1% of wear can be up to many tens of months.  In this case
+the wear might not matter because the disk will probably live longer
+than the host it serves.  For the disks this was developed with it was
+about 8 months pr. percentage point of wear.
+
+As long as the wear left percentage is high the calculation will be
+very inaccurate so the will only report "many" months of life left for
+wear percentages at or above 90%.
+
+Also, to avoid underwarn this plugin subtracts 1 from the percentage
+in the calculation.
+
+If this all feels too unreliavble use the -p and -q options to set
+percentage-based thresholds.  Although you cannot disable
+the -w and -c checks, you can set them to 0.
+
+=head1 DEVICE SUPPORT
+
+Different SSD disks use different SMART attributes to report wear,
+therefore this plugin does not support every SSD.
+
+=head2 Supported devices
+
+Hardware reporting the S.M.A.R.T. attributes shown below is supported.
+The attribute number is supplied in paranthesis, but I've seen that
+differnet manufacturers use the same attribute name but different
+numbers.  This plugin only matches the attribute name.
+
+=over 4
+
+=item Media_Wearout_Indicator (233)
+
+This is supported by (some?) Intel SSDs.  It reports the nominal wear
+left on the device in percent.  The drives I've looked at reports a
+threshold value of 0.
+
+The raw value of this attribute is always 0.
+
+=item Wear_Leveling_Count (177)
+
+This is supported by (some?) Samsung SSDs.  It reports the nominal
+wear left on the device in percent.  The drives I've looked at reports
+a threshold value of 5% but superuser.com shows screen dumps where the
+threshold is 0.
+
+The raw value for this attribute increases with wear but is useless
+for this plugin unless we can determine that the maximum value is, or
+how it relates to the percentage - which will vary from device to
+device and with disk capacity.
+
+=back
+
+Some other attributes are shown on
+https://www.hdsentinel.com/ssd_case_health_decrease_wearout.php but I
+hesitate to implement support without a data sheet or other reference
+material and a sample output.
+
+=head2 Unsupported devices
+
+The plugin ignores devices that `lsblk -o NAME,MODEL` shows as
+"LOGICAL VOLUME".  These might be hardware RAID drives etc.  Hopefuly
+you have some hardware specific plugin to monitor the health of these
+drives.
+
+If your server has unsupported SSDs the plugin will report a "UNKNOWN"
+error and identify the first unsupported device.  If so you will need
+to update the plugin to either ignore or support the specific
+hardware.  Please provide PR if you decide to support the device.
+
+If you would like to support more devices PRs are welcome.  Please
+take the trouble of looking up your devices data sheet to see what the
+manufacturer says about how the attribute works and update the
+documentation above.
+
+This plugin does not support disks hidden behind RAID
+controllers. Some RAID controllers report that the RAID device is
+non-rotational and so some effort is spent to ignore these.  Patches
+welcome, both for ignoring them and supporting them if there are SSDs
+behind there.
+
+This plugin does not support NVME disks.  They have different
+reporting format than disks with SSD interface.  Patches welcome.
+
+=head1 BUGS
+
+Probably.
+
+=head1 COPYRIGHT AND LICENSE
+
+(C) Copyright 2023 Schibsted Products and Technology. Written by
+Nicolai Langfeldt (nicolai.langfeldt@schibsted.no).
+
+License: Apache 2.0
+
+=head2 GPT, AI assistance
+
+I have experimented with ChatGPT(3.5) and GPT4 while writing this
+plugin.  After all it was tweeted that it could produce perfectly
+working programs in one try.
+
+The good news: GPT is quite good at structuring code.  It also taught
+me about the ROTA column for lsblk which made things a lot easier.
+
+Given error messages from python it immediately understoond that I was
+using python 2 not python3 (old server running CentOS 7) and provided
+corrected code that worked in python 2.
+
+https://github.com/yunal/notes/issues/4
+
+Also see https://github.com/yunal/notes/issues/3 for some quite
+impressive keeping track of details and raising the abstraction
+stakes.
+
+The bad news: It of course can't test the programs and has trouble
+with what regular expressions really do, and which parts of strings
+they pull out.
+
+Overall GPT3.5 and GPT4 appears to be a trainee or junior programmer
+that writes programs with perfect syntax in both shell, perl and
+python.  It makes some rather obvious mistakes with regards to which
+columns of output to use and finds it hard to write (more) correct
+code when the mistakes are pointed out.
+
+Some of the documentation text was suggested or influenced by
+GPT4. GPT4 also provided proff reading.  I was unable to get GPT4 to
+write this plugin for me.  I also asked GPT4 to suggest improvements
+to the code but the suggestions would either not work or make the code
+harder to read.
+
+=cut
+
+my %opts;
+
+getopts('hw:c:n:u:p:q:', \%opts);
+
+usage() if exists $opts{'h'};
+
+my $warn_mo  = $opts{'w'} // 6;
+my $crit_mo  = $opts{'c'} // 3;
+my $warn_pct = $opts{'p'};
+my $crit_pct = $opts{'q'};
+my $nossd   = $OK;       # What to report if no SSDs are seen
+my $unknown = $UNKNOWN;  # What to report if unknown SSD is seen
+
+$nossd = first_index { $_ eq $opts{'n'} } @state if exists $opts{'n'};
+
+$unknown = first_index { $_ eq $opts{'u'} } @state if exists $opts{'u'};
+
+usage() if $nossd < 0;
+
+sub usage {
+  pod2usage();
+  exit 0;
+}
+
+sub get_disks {
+  # Get list of SSD disks and list of the ones that house root file
+  # systems
+  my %ssd;
+  my %rootdisk;
+  my $basedev = '';
+  my $lsblk;
+  my $logical = {};
+
+  if (!($lsblk = `lsblk -pdo NAME,MODEL 2>/dev/null`)) {
+    say "UNKNOWN: lsblk command did not work";
+    exit $UNKNOWN;
+  }
+
+  # Find the logical drives and ignore them.  If you know how to
+  # support SSDs behind RAID controllers etc, please send patches.
+
+  # "Physical" disks with "MODEL" == 'LOGICAL VOLUME' or '' (emtpty
+  # string) are to be ignored.
+  foreach (split(/\n/s, $lsblk)) {
+      s/\s+$//;			# No trailing space
+      my ($dev,$model) = split(/\s+/, $_, 2);
+      $model //= '';
+      next if $dev eq 'NAME' or
+        ($model ne 'LOGICAL VOLUME' and
+         $model ne '');
+      $logical->{$dev} = 1;
+  }
+
+  if (!($lsblk = `lsblk -po NAME,ROTA,MOUNTPOINT 2>/dev/null`)) {
+    say "UNKNOWN: lsblk command did not work";
+    exit $UNKNOWN;
+  }
+
+  foreach (split(/\n/s, $lsblk)) {
+    s/^\s+//;			# No leading space
+    s/\│ //g;			# No space between the pipes
+    my ($dev, $rot, $mount) = split(/\s+/);
+    next if not defined $dev or $dev eq 'NAME';
+
+    $basedev = $dev if $dev =~ m~^/~;
+
+    next if $logical->{$basedev} or
+      substr($basedev,0,9) eq '/dev/nvme';
+
+    next if not defined $mount;
+
+    $ssd{$basedev} = 1 if $rot == 0;
+    $rootdisk{$basedev} = 1 if $mount eq '/';
+  }
+  return \%ssd, \%rootdisk;
+}
+
+
+sub get_param {
+  # Get column no. $index out of the line that matches the substring.
+  my ($smart, $substr, $index) = @_;
+
+  my $line;
+
+  return (split(/\s+/, $line))[$index]
+    if ($line) = $smart =~ /^(.*\s$substr\s.*)$/m;
+
+  return undef;
+}
+
+sub months_from_percentage {
+  my ($hours, $wear, $disk, $rootdisk) = @_;
+
+  my $state = $OK;
+
+  my $months_left;
+  if ($wear > 90) {
+    # Avoid:
+    # $wear = 100: division by zero
+    # $wear > 90: little wear gives very inaccurate calculation
+    $months_left = 'many';
+  } else {
+    $wear -= 1;       # 1% is still many months (8 months for some of
+    # our disks) and the drive might not ever report
+    # any number lower than 1, so round down.
+    my $wear_used = 100 - $wear;
+    $months_left = int( ( ( $hours / $wear_used ) ) * $wear / ( 24 * 30 ) );
+    if ($months_left < $crit_mo) {
+      $state = $CRITICAL;
+    } elsif ($months_left < $warn_mo) {
+      $state = $WARNING;
+      $state = $CRITICAL if $rootdisk->{$disk}; # Higher citicality for / disks
+    }
+  }
+  return ( $state, { wear => $wear,
+           monthsleft => $months_left,
+           isroot => $rootdisk->{$disk} // 0 } );
+}
+
+
+sub get_lifetime {
+  # For the found ssd disks calculate the lifetime left on the disk
+  # and maybe warn about it.
+  my ($disks, $rootdisk) = @_;
+
+  my %findings;
+
+  my $worst_disk = 'none';
+  my $worst_mo = 99999999;
+  my $state = $OK;
+
+  foreach my $disk (keys %{$disks}) {
+    my $smart = `sudo smartctl -A $disk`;
+    $smart =~ s/^\s+//gm;        # Remove leading space on all lines
+    $smart =~ s/^.*RAW_VALUE//s; # Remove heading section
+    $smart =~ s/^.*===$//s;      # Remove up to === START OF DATA on nvme
+    $smart =~ s/(\d) (\d)/$1$2/; # Remove single inter-digit spaces e.g. in "1 250"
+
+    my $hours  = get_param($smart, 'Power_On_Hours', -1);
+
+    # You could add other wear related attributes here, and have a
+    # different calculation below to fit it.
+
+    # Intel: This is a percentage of wear left in the device
+    my $wear   = get_param($smart, 'Media_Wearout_Indicator', 3);
+
+    # Samsung: This is a percentage of wear left in the device
+    my $wlc    = get_param($smart, 'Wear_Leveling_Count', 3);
+    my $wlcthr = get_param($smart, 'Wear_Leveling_Count', 5);
+
+    # These are equivalent
+    $wear = $wlc if defined $wlc;
+
+    # When adding For other kinds of attributes or calculations
+    # probably move this into different procedures for each kind of
+    # calculation.
+    my $diskstate;
+    my $finding;
+    if ($hours && $wear) {
+      ($diskstate, $finding) =
+        months_from_percentage($hours, $wear, $disk, $rootdisk, $wlcthr);
+    } else {
+      say "UNKNOWN: Unsupported SSD device: $disk";
+      exit $UNKNOWN;
+    }
+
+    $findings{$disk} = $finding;
+    $state = $diskstate if $diskstate > $state;
+    my $months_left = $finding->{monthsleft};
+
+    next if $months_left eq 'many';
+
+    if ($months_left < $worst_mo) {
+      $worst_mo = $months_left;
+      $worst_disk = $disk;
+    }
+
+  }
+
+  return $state, $worst_disk, \%findings;
+}
+
+my ($ssd, $rootdisk) = get_disks();
+
+if (scalar keys %{$ssd} == 0) {
+  say "$state[$nossd]: I can see no SSD disks here";
+  exit $nossd;
+}
+
+my ($state, $worst, $lifetimes) = get_lifetime($ssd, $rootdisk);
+
+my $isroot = 0;
+my $expectancy = 0;
+
+if ($state > 0) {
+  $isroot = $lifetimes->{$worst}->{isroot};
+  $expectancy = $lifetimes->{$worst}->{monthsleft};
+}
+
+my $statesum = "Wear left: ";
+
+map { $statesum .= sprintf("%s%s: %s months (%d%%); ", $_,
+			   ($lifetimes->{$_}->{isroot}?"(root)":""),
+			   $lifetimes->{$_}->{monthsleft},
+			   $lifetimes->{$_}->{wear});
+    } sort keys %{$lifetimes};
+
+if ($state == $OK) {
+  say "OK: No disks at risk.  $statesum";
+  exit $OK;
+}
+
+say "$state[$state]: $worst dies in $expectancy months! ".($isroot?"(is root disk)":"").
+  ". Also ".$statesum;
+
+exit $state;
