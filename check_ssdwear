@@ -14,6 +14,7 @@ use Getopt::Std;
 use Scalar::Util; # Bundeled
 use Data::Dumper;
 use List::MoreUtils qw(first_index); # Bundled;
+use JSON;
 
 my $OK       = 0;
 my $WARNING  = 1;
@@ -244,62 +245,61 @@ sub get_disks {
   my %rootdisk;
   my $basedev = '';
   my $lsblk;
-  my $logical = {};
+  my @physical;
 
   if (!($lsblk = `lsblk -pdo NAME,MODEL 2>/dev/null`)) {
     say "UNKNOWN: lsblk command did not work";
     exit $UNKNOWN;
   }
 
-  # Find the logical drives and ignore them.  If you know how to
-  # support SSDs behind RAID controllers etc, please send patches.
-
-  # "Physical" disks with "MODEL" == 'LOGICAL VOLUME' or '' (emtpty
-  # string) are to be ignored.
+  # "Physical" disks with "MODEL" == 'LOGICAL VOLUME' or '' (empty
+  # string) are ignored.  If you know how to support SSDs behind RAID
+  # controllers etc, please send patches.
   foreach (split(/\n/s, $lsblk)) {
       s/\s+$//;			# No trailing space
       my ($dev,$model) = split(/\s+/, $_, 2);
-      $model //= '';
-      next if $dev eq 'NAME' or
-        ($model ne 'LOGICAL VOLUME' and
-         $model ne '');
-      $logical->{$dev} = 1;
+      push(@physical, $dev) if $model && $model !~ /^(MODEL|LOGICAL VOLUME)$/;
   }
 
-  if (!($lsblk = `lsblk -po NAME,ROTA,MOUNTPOINT 2>/dev/null`)) {
+  if (!($lsblk = `lsblk -rpo NAME,ROTA,MOUNTPOINT 2>/dev/null`)) {
     say "UNKNOWN: lsblk command did not work";
     exit $UNKNOWN;
   }
 
   foreach (split(/\n/s, $lsblk)) {
-    s/^\s+//;			# No leading space
-    s/\│ //g;			# No space between the pipes
-    my ($dev, $rot, $mount) = split(/\s+/);
-    next if not defined $dev or $dev eq 'NAME';
+    my ($dev, $rot, $mount) = split(/\s/);
+    # ignore header
+    next if $dev eq 'NAME';
 
     $basedev = $dev if $dev =~ m~^/~;
+    $rootdisk{$basedev} = 1 if defined $mount && $mount eq '/';
 
-    next if $logical->{$basedev} or
-      substr($basedev,0,9) eq '/dev/nvme';
+    # ignore rotating disks
+    next if $rot == 1;
 
-    next if not defined $mount;
-
-    $ssd{$basedev} = 1 if $rot == 0;
-    $rootdisk{$basedev} = 1 if $mount eq '/';
+    # Look for a physical disk which match this prefix
+    for my $phys (@physical) {
+      if ($dev =~ m{^$phys}) {
+        # We only store the main device, not each partition
+        $ssd{$phys} = 1;
+      }
+    }
   }
   return \%ssd, \%rootdisk;
 }
 
 
 sub get_param {
-  # Get column no. $index out of the line that matches the substring.
-  my ($smart, $substr, $index) = @_;
+  # Get column no. $index for that parameter value, or undef if parameter is unknown
+  my ($smart, $param, $index) = @_;
 
-  my $line;
-
-  return (split(/\s+/, $line))[$index]
-    if ($line) = $smart =~ /^(.*\s$substr\s.*)$/m;
-
+  if (exists $smart->{$param}) {
+    if (ref $smart->{$param} eq 'ARRAY') {
+      return $smart->{$param}->[$index];
+    } elsif ($index == 0 || $index == -1) {
+      return $smart->{$param};
+    }
+  }
   return undef;
 }
 
@@ -332,7 +332,98 @@ sub months_from_percentage {
            isroot => $rootdisk->{$disk} // 0 } );
 }
 
-
+sub smart_data {
+  my ($dev) = @_;
+  my $data;
+  my $try_human_nvme;
+  if ($dev =~ m{/nvme}) {
+    # nvme-smart-log(1) has had JSON output support since at least
+    # 1.5, which means from Ubuntu 18.04 and EL7
+    my $output = `sudo nvme smart-log $dev -o json 2>&1`;
+    if ($output =~ /unrecognized option/) {
+      $try_human_nvme = 1;
+    } else {
+      if ($?) {
+        say "UNKNOWN: nvme smart-log $dev failed";
+        exit $UNKNOWN;
+      }
+      if ($output !~ /^{/) {
+        say "UNKNOWN: nvme smart-log $dev did not return JSON output";
+        exit $UNKNOWN;
+      }
+      $data = decode_json($output);
+    }
+  }
+  unless ($data) {
+    # smartctl's JSON output format is newer, so we munge the "human
+    # friendly" output into a hash instead.
+    my $smart;
+    if ($try_human_nvme) {
+      $smart = `sudo nvme smart-log $dev`;
+    } else {
+      $smart = `sudo smartctl -A $dev`;
+      if ($smart =~ /Unable to detect device type/) {
+        say "UNKNOWN: smartctl too old to recognize $dev";
+        exit $UNKNOWN;
+      }
+    }
+    $smart =~ s/^\s+//gm;        # Remove leading space on all lines
+    $smart =~ s/^.*RAW_VALUE//s; # Remove heading section
+    $smart =~ s/(\d) (\d)/$1$2/; # Remove single inter-digit spaces e.g. in "1 250"
+    if ($smart =~ s/^.*===$//s || $smart =~ /^Smart Log/) {
+      # This handles format like (smartctl -A):
+      # === START OF SMART DATA SECTION ===
+      # SMART/Health Information (NVMe Log 0x02)
+      # Critical Warning:                   0x00
+      # Temperature:                        33 Celsius
+      #
+      # Or (nvme smart-log):
+      # Smart Log for NVME device:nvme0n1 namespace-id:ffffffff
+      # critical_warning                    : 0x4
+      for my $line (split(/\n/, $smart)) {
+        my ($param, $value) = split(/\s*:\s*/, $line, 2);
+        if (defined $value) {
+          $param =~ tr/[A-Z ]/[a-z_]/;
+          if ($value =~ /^0x/) {
+            $value = hex($value);
+          } elsif ($value =~ /^(\d+)%$/) {
+            # turn percentage into pure integer
+            $value = $1;
+          } elsif ($value =~ /^(\d+([.,]\d{3}))( \[.*\])?$/) {
+            # throw away " [314 TB]"
+            $value = $1;
+            # you have to love decimal separators...
+            $value =~ s/[.,]//g;
+          }
+          $data->{$param} = [$value];
+        }
+      }
+    } else {
+      # Format like:
+      # ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_FAILED RAW_VALUE
+      #   5 Reallocated_Sector_Ct   0x0032   100   100   000    Old_age   Always       -       0
+      for my $line (split(/\n/, $smart)) {
+        my ($id, $param, @values) = split(/\s/, $line);
+        $param = lc $param;
+        $data->{$param} = [];
+        for (@values) {
+          if (/^0x/) {
+            $_ = hex($_);
+          } elsif (/^0\d*$/) {
+            # This is *not* octal
+            $_ = $_ + 0;
+          } elsif (/^\d+([.,]\d{3})+$/) {
+            # you have to love decimal separators...
+            s/[.,]//g;
+          }
+          push(@{$data->{$param}}, $_);
+        }
+      }
+    }
+  }
+  return $data;
+}
+  
 sub get_lifetime {
   # For the found ssd disks calculate the lifetime left on the disk
   # and maybe warn about it.
@@ -345,26 +436,27 @@ sub get_lifetime {
   my $state = $OK;
 
   foreach my $disk (keys %{$disks}) {
-    my $smart = `sudo smartctl -A $disk`;
-    $smart =~ s/^\s+//gm;        # Remove leading space on all lines
-    $smart =~ s/^.*RAW_VALUE//s; # Remove heading section
-    $smart =~ s/^.*===$//s;      # Remove up to === START OF DATA on nvme
-    $smart =~ s/(\d) (\d)/$1$2/; # Remove single inter-digit spaces e.g. in "1 250"
+    my $smart = smart_data($disk);
 
-    my $hours  = get_param($smart, 'Power_On_Hours', -1);
+    my $hours  = get_param($smart, 'power_on_hours', -1);
 
     # You could add other wear related attributes here, and have a
     # different calculation below to fit it.
 
     # Intel: This is a percentage of wear left in the device
-    my $wear   = get_param($smart, 'Media_Wearout_Indicator', 3);
+    my $wear   = get_param($smart, 'media_wearout_indicator', 3);
 
     # Samsung: This is a percentage of wear left in the device
-    my $wlc    = get_param($smart, 'Wear_Leveling_Count', 3);
-    my $wlcthr = get_param($smart, 'Wear_Leveling_Count', 5);
+    my $wlc    = get_param($smart, 'wear_leveling_count', 3);
+    my $wlcthr = get_param($smart, 'wear_leveling_count', 5);
 
     # These are equivalent
     $wear = $wlc if defined $wlc;
+
+    # NVMe reports usage which starts at 0% and can run as high as 254%
+    my $percent_used = get_param($smart, "percent_used", 0);
+    $percent_used = get_param($smart, "percentage_used", 0) unless defined $percent_used;
+    $wear = 100 - $percent_used if defined $percent_used;
 
     # When adding For other kinds of attributes or calculations
     # probably move this into different procedures for each kind of
@@ -425,7 +517,13 @@ if ($state == $OK) {
   exit $OK;
 }
 
-say "$state[$state]: $worst dies in $expectancy months! ".($isroot?"(is root disk)":"").
-  ". Also ".$statesum;
+my $month = abs(int($expectancy)) == 1 ? "month" : "months";
+my $expect = $expectancy < 0 ?
+    sprintf("was expected to die %d %s ago", abs($expectancy), $month) :
+    sprintf("is expected to die in %d %s", $expectancy, $month);
+
+printf("%s: %s %s! %s\n",
+       $state[$state], $worst . ($isroot ? " (root disk)" : ""),
+       $expect, $statesum);
 
 exit $state;
