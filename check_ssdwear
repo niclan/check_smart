@@ -13,15 +13,16 @@ use Pod::Usage; # Bundled
 use Getopt::Std;
 use Scalar::Util; # Bundeled
 use Data::Dumper;
-use List::MoreUtils qw(first_index); # Bundled;
 use JSON;
 
-my $OK       = 0;
-my $WARNING  = 1;
-my $CRITICAL = 2;
-my $UNKNOWN  = 3;
+my @states   = qw(OK WARNING CRITICAL UNKNOWN);
+my %stateval = map { $states[$_] => $_ } 0 .. $#states;
 
-my @state    = qw(OK WARNING CRITICAL UNKNOWN);
+my $OK       = $stateval{OK};
+my $WARNING  = $stateval{WARNING};
+my $CRITICAL = $stateval{CRITICAL};
+my $UNKNOWN  = $stateval{UNKNOWN};
+
 
 =pod
 
@@ -244,9 +245,8 @@ my $crit_pct = $opts{'q'};
 my $nossd   = $OK;       # What to report if no SSDs are seen
 my $unknown = $UNKNOWN;  # What to report if unknown SSD is seen
 
-$nossd = first_index { $_ eq $opts{'n'} } @state if exists $opts{'n'};
-
-$unknown = first_index { $_ eq $opts{'u'} } @state if exists $opts{'u'};
+$nossd = $stateval{$opts{'n'}} if exists $opts{'n'};
+$unknown = $stateval{$opts{'u'}} if exists $opts{'u'};
 
 usage() if $nossd < 0;
 
@@ -522,7 +522,7 @@ sub get_lifetime {
 my ($ssd, $rootdisk, $in_use) = get_disks();
 
 if (scalar keys %{$ssd} == 0) {
-  say "$state[$nossd]: I can see no SSD disks here";
+  say "$states[$nossd]: I can see no SSD disks here";
   exit $nossd;
 }
 
@@ -558,7 +558,7 @@ my $expect = $expectancy < 0 ?
     sprintf("is expected to die in %d %s", $expectancy, $month);
 
 printf("%s: %s %s! %s\n",
-       $state[$state], $worst . ($isroot ? " (root disk)" : ""),
+       $states[$state], $worst . ($isroot ? " (root disk)" : ""),
        $expect, $statesum);
 
 exit $state;
