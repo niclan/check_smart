@@ -133,6 +133,23 @@ for this plugin unless we can determine that the maximum value is, or
 how it relates to the percentage - which will vary from device to
 device and with disk capacity.
 
+=item Percentage used estimate
+
+This is from nvme smart-log.  In nvme(1)'s JSON output(1), it is
+called "percent_used", while smartctl(1) output says "percentage
+used".  The value goes from 0% (unused) to 100% (nominal life) and is
+capped at 255%.
+
+=item Other parameters
+
+Other parameters observed on StackExchange and similar, they works the
+same as the above attributes
+
+169 Remaining_Lifetime_Perc (Adata, Innodisk)
+201 Lifetime_Remaining%
+202 Percent_Lifetime_Remain (Crucial)
+231 SSD_Life_Left (Sandforce/Kingston)
+
 =back
 
 Some other attributes are shown on
@@ -306,6 +323,7 @@ sub get_param {
 
   if (exists $smart->{$param}) {
     if (ref $smart->{$param} eq 'ARRAY') {
+      $index += scalar @{$smart->{$param}} if $index < 0;
       return $smart->{$param}->[$index];
     } elsif ($index == 0 || $index == -1) {
       return $smart->{$param};
@@ -379,7 +397,6 @@ sub smart_data {
       }
     }
     $smart =~ s/^\s+//gm;        # Remove leading space on all lines
-    $smart =~ s/^.*RAW_VALUE//s; # Remove heading section
     $smart =~ s/(\d) (\d)/$1$2/; # Remove single inter-digit spaces e.g. in "1 250"
     if ($smart =~ s/^.*===$//s || $smart =~ /^Smart Log/) {
       # This handles format like (smartctl -A):
@@ -395,7 +412,8 @@ sub smart_data {
         my ($param, $value) = split(/\s*:\s*/, $line, 2);
         if (defined $value) {
           $param =~ tr/[A-Z ]/[a-z_]/;
-          if ($value =~ /^0x/) {
+          if ($value =~ /^0x[0-9a-f]{1,8}$/) {
+            # hex() will only decode 32 bit values, so leave 64-bit in place
             $value = hex($value);
           } elsif ($value =~ /^(\d+)%$/) {
             # turn percentage into pure integer
@@ -413,12 +431,14 @@ sub smart_data {
       # Format like:
       # ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_FAILED RAW_VALUE
       #   5 Reallocated_Sector_Ct   0x0032   100   100   000    Old_age   Always       -       0
+      $smart =~ s/^.*RAW_VALUE\n//s; # Remove heading section
       for my $line (split(/\n/, $smart)) {
-        my ($id, $param, @values) = split(/\s/, $line);
+        my ($id, $param, @values) = split(/\s+/, $line);
         $param = lc $param;
         $data->{$param} = [];
         for (@values) {
-          if (/^0x/) {
+          if (/^0x[0-9a-f]{1,8}$/) {
+            # hex() will only decode 32 bit values, so leave 64-bit in place
             $_ = hex($_);
           } elsif (/^0\d*$/) {
             # This is *not* octal
@@ -455,18 +475,17 @@ sub get_lifetime {
     # different calculation below to fit it.
 
     # Intel: This is a percentage of wear left in the device
-    my $wear   = get_param($smart, 'media_wearout_indicator', 3);
-
+    my $wear = get_param($smart, 'media_wearout_indicator', 1);
+    $wear = get_param($smart, 'ssd_life_left', 1) unless defined $wear;
+    $wear = get_param($smart, "remaining_lifetime_perc", 1) unless defined $wear;
     # Samsung: This is a percentage of wear left in the device
-    my $wlc    = get_param($smart, 'wear_leveling_count', 3);
-    my $wlcthr = get_param($smart, 'wear_leveling_count', 5);
-
-    # These are equivalent
-    $wear = $wlc if defined $wlc;
+    $wear = get_param($smart, 'wear_leveling_count', 1) unless defined $wear;
 
     # NVMe reports usage which starts at 0% and can run as high as 254%
     my $percent_used = get_param($smart, "percent_used", 0);
     $percent_used = get_param($smart, "percentage_used", 0) unless defined $percent_used;
+    $percent_used = get_param($smart, "lifetime_remaining%", 1) unless defined $percent_used;
+    $percent_used = get_param($smart, "percent_lifetime_remain", 1) unless defined $percent_used;
     $wear = 100 - $percent_used if defined $percent_used;
 
     # When adding For other kinds of attributes or calculations
@@ -477,7 +496,7 @@ sub get_lifetime {
 
     if ($hours && $wear) {
       ($diskstate, $finding) =
-        months_from_percentage($hours, $wear, $disk, $rootdisk, $wlcthr);
+        months_from_percentage($hours, $wear, $disk, $rootdisk);
     } else {
       say "UNKNOWN: Unsupported SSD device: $disk";
       exit $UNKNOWN;
