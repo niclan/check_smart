@@ -246,6 +246,7 @@ sub get_disks {
   my $basedev = '';
   my $lsblk;
   my @physical;
+  my %in_use;
 
   if (!($lsblk = `lsblk -pdo NAME,MODEL 2>/dev/null`)) {
     say "UNKNOWN: lsblk command did not work";
@@ -258,7 +259,14 @@ sub get_disks {
   foreach (split(/\n/s, $lsblk)) {
       s/\s+$//;			# No trailing space
       my ($dev,$model) = split(/\s+/, $_, 2);
-      push(@physical, $dev) if $model && $model !~ /^(MODEL|LOGICAL VOLUME)$/;
+      if ($model && $model !~ /^(MODEL|LOGICAL VOLUME)$/) {
+        push(@physical, $dev);
+        (my $basedev = $dev) =~ s{^/dev/}{};
+        my @holders = glob("/sys/block/${basedev}/holders/*");
+        if (@holders) {
+          $in_use{$dev} = 1;
+        }
+      }
   }
 
   if (!($lsblk = `lsblk -rpo NAME,ROTA,MOUNTPOINT 2>/dev/null`)) {
@@ -282,10 +290,13 @@ sub get_disks {
       if ($dev =~ m{^$phys}) {
         # We only store the main device, not each partition
         $ssd{$phys} = 1;
+        # A partition.  Mark the physical device as in use
+        $in_use{$phys} = 1 if $dev ne $phys;
       }
     }
   }
-  return \%ssd, \%rootdisk;
+
+  return \%ssd, \%rootdisk, \%in_use;
 }
 
 
@@ -427,7 +438,7 @@ sub smart_data {
 sub get_lifetime {
   # For the found ssd disks calculate the lifetime left on the disk
   # and maybe warn about it.
-  my ($disks, $rootdisk) = @_;
+  my ($disks, $rootdisk, $in_use) = @_;
 
   my %findings;
 
@@ -463,6 +474,7 @@ sub get_lifetime {
     # calculation.
     my $diskstate;
     my $finding;
+
     if ($hours && $wear) {
       ($diskstate, $finding) =
         months_from_percentage($hours, $wear, $disk, $rootdisk, $wlcthr);
@@ -470,16 +482,17 @@ sub get_lifetime {
       say "UNKNOWN: Unsupported SSD device: $disk";
       exit $UNKNOWN;
     }
+    $finding->{in_use} = $in_use->{$disk};
 
     $findings{$disk} = $finding;
-    $state = $diskstate if $diskstate > $state;
     my $months_left = $finding->{monthsleft};
 
-    next if $months_left eq 'many';
-
-    if ($months_left < $worst_mo) {
-      $worst_mo = $months_left;
-      $worst_disk = $disk;
+    if ($finding->{in_use} && $months_left ne 'many') {
+      $state = $diskstate if $diskstate > $state;
+      if ($months_left < $worst_mo) {
+        $worst_mo = $months_left;
+        $worst_disk = $disk;
+      }
     }
 
   }
@@ -487,14 +500,14 @@ sub get_lifetime {
   return $state, $worst_disk, \%findings;
 }
 
-my ($ssd, $rootdisk) = get_disks();
+my ($ssd, $rootdisk, $in_use) = get_disks();
 
 if (scalar keys %{$ssd} == 0) {
   say "$state[$nossd]: I can see no SSD disks here";
   exit $nossd;
 }
 
-my ($state, $worst, $lifetimes) = get_lifetime($ssd, $rootdisk);
+my ($state, $worst, $lifetimes) = get_lifetime($ssd, $rootdisk, $in_use);
 
 my $isroot = 0;
 my $expectancy = 0;
@@ -507,7 +520,10 @@ if ($state > 0) {
 my $statesum = "Wear left: ";
 
 map { $statesum .= sprintf("%s%s: %s months (%d%%); ", $_,
-			   ($lifetimes->{$_}->{isroot}?"(root)":""),
+			   ($lifetimes->{$_}->{isroot}
+                            ? " (root)"
+                            : ($lifetimes->{$_}->{in_use} ? "" : " (not in use)")
+                           ),
 			   $lifetimes->{$_}->{monthsleft},
 			   $lifetimes->{$_}->{wear});
     } sort keys %{$lifetimes};
