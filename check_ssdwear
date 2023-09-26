@@ -556,7 +556,9 @@ if ($state == $OK) {
 }
 
 my $expect = "is unsupported";
-unless ($state == $UNKNOWN) {
+if ($state == $UNKNOWN) {
+  $state = $unknown;
+} else {
   my $month = abs(int($expectancy)) == 1 ? "month" : "months";
   my $expect = $expectancy < 0 ?
       sprintf("was expected to die %d %s ago", abs($expectancy), $month) :
