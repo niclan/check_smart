@@ -49,10 +49,10 @@ check_ssdwear [options]
   -n OK|WARNING|CRITICAL|UNKNOWN
                State to report if there are no SSDs in the system
   -u OK|WARNING|CRITICAL|UNKNOWN
-               State to report if there is a unsupported SSD in the system
-               This MUST be fixed by updating the plugin as the plugin
-               exits immediately if this is discovered, and no monitoring
-               will take place.
+               State to report if there is a unsupported SSD in the
+               system.  This MUST be fixed by updating the plugin as
+               the plugin will report this state regardless of status
+               for any other devices.
   -h           This message
 
 NOTE! The program uses sudo to run smartctl, so your nagios/nrpe user
@@ -498,8 +498,11 @@ sub get_lifetime {
       ($diskstate, $finding) =
         months_from_percentage($hours, $wear, $disk, $rootdisk);
     } else {
-      say "UNKNOWN: Unsupported SSD device: $disk";
-      exit $UNKNOWN;
+      $diskstate = $UNKNOWN;
+      $finding = {
+        monthsleft => 'unknown',
+        wear => -1,
+      };
     }
     $finding->{in_use} = $in_use->{$disk};
 
@@ -507,11 +510,11 @@ sub get_lifetime {
     my $months_left = $finding->{monthsleft};
 
     if ($finding->{in_use} && $months_left ne 'many') {
-      $state = $diskstate if $diskstate > $state;
-      if ($months_left < $worst_mo) {
+      if ($diskstate > $state or $months_left =~ /\d/ && $months_left < $worst_mo) {
         $worst_mo = $months_left;
         $worst_disk = $disk;
       }
+      $state = $diskstate if $diskstate > $state;
     }
 
   }
@@ -552,10 +555,13 @@ if ($state == $OK) {
   exit $OK;
 }
 
-my $month = abs(int($expectancy)) == 1 ? "month" : "months";
-my $expect = $expectancy < 0 ?
-    sprintf("was expected to die %d %s ago", abs($expectancy), $month) :
-    sprintf("is expected to die in %d %s", $expectancy, $month);
+my $expect = "is unsupported";
+unless ($state == $UNKNOWN) {
+  my $month = abs(int($expectancy)) == 1 ? "month" : "months";
+  my $expect = $expectancy < 0 ?
+      sprintf("was expected to die %d %s ago", abs($expectancy), $month) :
+      sprintf("is expected to die in %d %s", $expectancy, $month);
+}
 
 printf("%s: %s %s! %s\n",
        $states[$state], $worst . ($isroot ? " (root disk)" : ""),
