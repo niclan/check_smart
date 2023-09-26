@@ -261,13 +261,17 @@ sub get_disks {
   my %ssd;
   my %rootdisk;
   my $basedev = '';
-  my $lsblk;
   my @physical;
   my %in_use;
 
-  if (!($lsblk = `lsblk -pdo NAME,MODEL 2>/dev/null`)) {
-    say "UNKNOWN: lsblk command did not work";
+  my $lsblk = `lsblk -pdo NAME,MODEL 2>/dev/null`;
+  if ($?) {
+    printf("UNKNOWN: lsblk exited with error code %d\n", $? >> 8);
     exit $UNKNOWN;
+  }
+  unless ($lsblk) {
+    # No disks at all
+    return \%ssd, \%rootdisk, \%in_use;
   }
 
   # "Physical" disks with "MODEL" == 'LOGICAL VOLUME' or '' (empty
