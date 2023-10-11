@@ -13,7 +13,6 @@ use Pod::Usage; # Bundled
 use Getopt::Std;
 use Scalar::Util; # Bundeled
 use Data::Dumper;
-use JSON;
 
 my @states   = qw(OK WARNING CRITICAL UNKNOWN);
 my %stateval = map { $states[$_] => $_ } 0 .. $#states;
@@ -23,12 +22,11 @@ my $WARNING  = $stateval{WARNING};
 my $CRITICAL = $stateval{CRITICAL};
 my $UNKNOWN  = $stateval{UNKNOWN};
 
-
 =pod
 
 =head1 NAME
 
-check_ssdwear - Check all SSD disks in the system for wear left.
+check_ssdwear - Check all SSD (including nvme) disks in the system for wear left
 
 =head1 SYNOPSIS
 
@@ -55,8 +53,8 @@ check_ssdwear [options]
                for any other devices.
   -h           This message
 
-NOTE! The program uses sudo to run smartctl, so your nagios/nrpe user
-needs sudo for this.
+NOTE! The program uses sudo to run smartctl and nvme, so your
+nagios/nrpe user needs sudo for this.
 
 NOTE! Do not use this in an alarm that wakes people up at night.  Disk
 weardown is NOT that acute! Or is it?
@@ -72,10 +70,11 @@ restrictions.
 
 =head1 REQUIRED PROGRAMS
 
-External programs are required: sudo, lsblk, smartctl.
+External programs are required: sudo, lsblk, smartctl, nvme
+(nvme-cli, only if host has /dev/nvme* devices).
 
-The program uses sudo to run smartctl, so your nagios/nrpe user needs
-sudo for this.
+The program uses sudo to run smartctl and nvme, so your nagios/nrpe
+user needs sudo for this.
 
 =head1 LIFETIME CALCULATION
 
@@ -112,6 +111,9 @@ The attribute number is supplied in paranthesis, but I've seen that
 differnet manufacturers use the same attribute name but different
 numbers.  This plugin only matches the attribute name.
 
+For ssd disks the attributes are collected with smartctl(1). In case
+of nvme disks the attributes are collected with nvme(1).
+
 =over 4
 
 =item Media_Wearout_Indicator (233)
@@ -134,12 +136,12 @@ for this plugin unless we can determine that the maximum value is, or
 how it relates to the percentage - which will vary from device to
 device and with disk capacity.
 
-=item Percentage used estimate
+=item "Percentage used"
 
-This is from nvme smart-log.  In nvme(1)'s JSON output(1), it is
-called "percent_used", while smartctl(1) output says "percentage
-used".  The value goes from 0% (unused) to 100% (nominal life) and is
-capped at 255%.
+This is for nvme devices from nvme smart-log.  In nvme(1)'s JSON
+output(1), it is called "percent_used", while smartctl(1) output is
+"percentage used".  The value goes from 0% (unused) to 100% (nominal
+life) and is capped at 255%.
 
 =item Other parameters
 
@@ -152,11 +154,6 @@ same as the above attributes
 231 SSD_Life_Left (Sandforce/Kingston)
 
 =back
-
-Some other attributes are shown on
-https://www.hdsentinel.com/ssd_case_health_decrease_wearout.php but I
-hesitate to implement support without a data sheet or other reference
-material and a sample output.
 
 =head2 Unsupported devices
 
@@ -180,9 +177,6 @@ controllers. Some RAID controllers report that the RAID device is
 non-rotational and so some effort is spent to ignore these.  Patches
 welcome, both for ignoring them and supporting them if there are SSDs
 behind there.
-
-This plugin does not support NVME disks.  They have different
-reporting format than disks with SSD interface.  Patches welcome.
 
 =head1 BUGS
 
@@ -336,6 +330,7 @@ sub get_param {
   return undef;
 }
 
+
 sub months_from_percentage {
   my ($hours, $wear, $disk, $rootdisk) = @_;
 
@@ -365,77 +360,59 @@ sub months_from_percentage {
            isroot => $rootdisk->{$disk} // 0 } );
 }
 
+
 sub smart_data {
   my ($dev) = @_;
   my $data;
   my $try_human_nvme;
+
+  my $smart;
   if ($dev =~ m{/nvme}) {
-    # nvme-smart-log(1) has had JSON output support since at least
-    # 1.5, which means from Ubuntu 18.04 and EL7
-    my $output = `sudo nvme smart-log $dev -o json 2>&1`;
-    if ($output =~ /unrecognized option/) {
-      $try_human_nvme = 1;
-    } else {
-      if ($?) {
-        say "UNKNOWN: nvme smart-log $dev failed";
-        exit $UNKNOWN;
-      }
-      if ($output !~ /^{/) {
-        say "UNKNOWN: nvme smart-log $dev did not return JSON output";
-        exit $UNKNOWN;
-      }
-      $data = decode_json($output);
+    # Munge the "human friendly" output into a hash
+    $smart = `sudo nvme smart-log $dev`;
+  } else {
+    $smart = `sudo smartctl -A $dev`;
+    if ($smart =~ /Unable to detect device type/) {
+      say "UNKNOWN: smartctl too old to recognize $dev";
+      exit $UNKNOWN;
     }
   }
-  unless ($data) {
-    # smartctl's JSON output format is newer, so we munge the "human
-    # friendly" output into a hash instead.
-    my $smart;
-    if ($try_human_nvme) {
-      $smart = `sudo nvme smart-log $dev`;
-    } else {
-      $smart = `sudo smartctl -A $dev`;
-      if ($smart =~ /Unable to detect device type/) {
-        say "UNKNOWN: smartctl too old to recognize $dev";
-        exit $UNKNOWN;
+  $smart =~ s/^\s+//gm;         # Remove leading space on all lines
+  $smart =~ s/(\d) (\d)/$1$2/; # Remove single inter-digit spaces e.g. in "1 250"
+  if ($smart =~ s/^.*===$//s || $smart =~ /^Smart Log/) {
+    # This handles format like (smartctl -A):
+    # === START OF SMART DATA SECTION ===
+    # SMART/Health Information (NVMe Log 0x02)
+    # Critical Warning:                   0x00
+    # Temperature:                        33 Celsius
+    #
+    # Or (nvme smart-log):
+    # Smart Log for NVME device:nvme0n1 namespace-id:ffffffff
+    # critical_warning                    : 0x4
+    for my $line (split(/\n/, $smart)) {
+      my ($param, $value) = split(/\s*:\s*/, $line, 2);
+      if (defined $value) {
+        $param =~ tr/[A-Z ]/[a-z_]/;
+        if ($value =~ /^0x[0-9a-f]{1,8}$/) {
+          # hex() will only decode 32 bit values, so leave 64-bit in place
+          $value = hex($value);
+        } elsif ($value =~ /^(\d+)%$/) {
+          # turn percentage into pure integer
+          $value = $1;
+        } elsif ($value =~ /^(\d+([.,]\d{3}))( \[.*\])?$/) {
+          # throw away " [314 TB]"
+          $value = $1;
+          # you have to love decimal separators...
+          $value =~ s/[.,]//g;
+        }
+        $data->{$param} = [$value];
       }
     }
-    $smart =~ s/^\s+//gm;        # Remove leading space on all lines
-    $smart =~ s/(\d) (\d)/$1$2/; # Remove single inter-digit spaces e.g. in "1 250"
-    if ($smart =~ s/^.*===$//s || $smart =~ /^Smart Log/) {
-      # This handles format like (smartctl -A):
-      # === START OF SMART DATA SECTION ===
-      # SMART/Health Information (NVMe Log 0x02)
-      # Critical Warning:                   0x00
-      # Temperature:                        33 Celsius
-      #
-      # Or (nvme smart-log):
-      # Smart Log for NVME device:nvme0n1 namespace-id:ffffffff
-      # critical_warning                    : 0x4
-      for my $line (split(/\n/, $smart)) {
-        my ($param, $value) = split(/\s*:\s*/, $line, 2);
-        if (defined $value) {
-          $param =~ tr/[A-Z ]/[a-z_]/;
-          if ($value =~ /^0x[0-9a-f]{1,8}$/) {
-            # hex() will only decode 32 bit values, so leave 64-bit in place
-            $value = hex($value);
-          } elsif ($value =~ /^(\d+)%$/) {
-            # turn percentage into pure integer
-            $value = $1;
-          } elsif ($value =~ /^(\d+([.,]\d{3}))( \[.*\])?$/) {
-            # throw away " [314 TB]"
-            $value = $1;
-            # you have to love decimal separators...
-            $value =~ s/[.,]//g;
-          }
-          $data->{$param} = [$value];
-        }
-      }
-    } else {
-      # Format like:
-      # ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_FAILED RAW_VALUE
-      #   5 Reallocated_Sector_Ct   0x0032   100   100   000    Old_age   Always       -       0
-      $smart =~ s/^.*RAW_VALUE\n//s; # Remove heading section
+  } else {
+    # Format like:
+    # ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  WHEN_FAILED RAW_VALUE
+    #   5 Reallocated_Sector_Ct   0x0032   100   100   000    Old_age   Always       -       0
+    $smart =~ s/^.*RAW_VALUE\n//s; # Remove heading section
       for my $line (split(/\n/, $smart)) {
         my ($id, $param, @values) = split(/\s+/, $line);
         $param = lc $param;
@@ -454,11 +431,12 @@ sub smart_data {
           push(@{$data->{$param}}, $_);
         }
       }
-    }
   }
+  print Dumper $data;
   return $data;
 }
-  
+
+
 sub get_lifetime {
   # For the found ssd disks calculate the lifetime left on the disk
   # and maybe warn about it.
@@ -472,25 +450,30 @@ sub get_lifetime {
 
   foreach my $disk (keys %{$disks}) {
     my $smart = smart_data($disk);
-
-    my $hours  = get_param($smart, 'power_on_hours', -1);
+    my $hours = get_param($smart, 'power_on_hours', -1);
 
     # You could add other wear related attributes here, and have a
     # different calculation below to fit it.
 
     # Intel: This is a percentage of wear left in the device
     my $wear = get_param($smart, 'media_wearout_indicator', 1);
+    # Sandforce/Kingston:
     $wear = get_param($smart, 'ssd_life_left', 1) unless defined $wear;
+    # Adata, innodisk:
     $wear = get_param($smart, "remaining_lifetime_perc", 1) unless defined $wear;
     # Samsung: This is a percentage of wear left in the device
     $wear = get_param($smart, 'wear_leveling_count', 1) unless defined $wear;
 
-    # NVMe reports usage which starts at 0% and can run as high as 254%
-    my $percent_used = get_param($smart, "percent_used", 0);
-    $percent_used = get_param($smart, "percentage_used", 0) unless defined $percent_used;
-    $percent_used = get_param($smart, "lifetime_remaining%", 1) unless defined $percent_used;
-    $percent_used = get_param($smart, "percent_lifetime_remain", 1) unless defined $percent_used;
-    $wear = 100 - $percent_used if defined $percent_used;
+    if (!$wear) {
+      # Check for some attributes that count from 0 to 100 instead of 100 to 0.
+
+      # NVMe reports usage which starts at 0% and can run as high as 254%
+      my $percent_used = get_param($smart, "percent_used", 0);
+      $percent_used = get_param($smart, "percentage_used", 0) unless defined $percent_used;
+      $percent_used = get_param($smart, "lifetime_remaining%", 1) unless defined $percent_used;
+      $percent_used = get_param($smart, "percent_lifetime_remain", 1) unless defined $percent_used;
+      $wear = 100 - $percent_used if defined $percent_used;
+    }
 
     # When adding For other kinds of attributes or calculations
     # probably move this into different procedures for each kind of
@@ -525,6 +508,10 @@ sub get_lifetime {
 
   return $state, $worst_disk, \%findings;
 }
+
+
+# Can't be parsing all sorts of weird character sets and strings
+$ENV{'LC_ALL'} = 'C';
 
 my ($ssd, $rootdisk, $in_use) = get_disks();
 
