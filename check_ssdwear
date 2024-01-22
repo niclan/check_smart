@@ -432,7 +432,6 @@ sub smart_data {
         }
       }
   }
-  print Dumper $data;
   return $data;
 }
 
@@ -551,9 +550,9 @@ if ($state == $UNKNOWN) {
   $state = $unknown;
 } else {
   my $month = abs(int($expectancy)) == 1 ? "month" : "months";
-  my $expect = $expectancy < 0 ?
-      sprintf("was expected to die %d %s ago", abs($expectancy), $month) :
-      sprintf("is expected to die in %d %s", $expectancy, $month);
+  $expect = $expectancy < 0 ?
+    sprintf("was expected to die %d %s ago", abs($expectancy), $month) :
+    sprintf("is expected to die in %d %s", $expectancy, $month);
 }
 
 printf("%s: %s %s! %s\n",
