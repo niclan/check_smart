@@ -274,13 +274,16 @@ sub get_disks {
   foreach (split(/\n/s, $lsblk)) {
       s/\s+$//;			# No trailing space
       my ($dev,$model) = split(/\s+/, $_, 2);
-      if ($model && $model !~ /^(MODEL|LOGICAL VOLUME)$/) {
-        push(@physical, $dev);
-        (my $basedev = $dev) =~ s{^/dev/}{};
-        my @holders = glob("/sys/block/${basedev}/holders/*");
-        if (@holders) {
+      if ($model) {
+	  next if $model =~ /^MODEL$/;		# Headline
+	  next if $model =~ /^MR\d\d\d\d/;	# Megaraid
+	  next if $model =~ /^LOGICAL VOLUME$/; # HP Raid
+      }
+      push(@physical, $dev);
+      (my $basedev = $dev) =~ s{^/dev/}{};
+      my @holders = glob("/sys/block/${basedev}/holders/*");
+      if (@holders) {
           $in_use{$dev} = 1;
-        }
       }
   }
 
