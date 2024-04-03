@@ -278,6 +278,8 @@ sub get_disks {
 	  next if $model =~ /^MODEL$/;		# Headline
 	  next if $model =~ /^MR\d\d\d\d/;	# Megaraid
 	  next if $model =~ /^LOGICAL VOLUME$/; # HP Raid
+      } else {
+	  next;
       }
       push(@physical, $dev);
       (my $basedev = $dev) =~ s{^/dev/}{};
